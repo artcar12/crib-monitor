@@ -34,7 +34,7 @@ uv is installed system-wide, and the Python it downloads lives inside `/opt/crib
 sudo apt install ffmpeg git
 curl -LsSf https://astral.sh/uv/install.sh | sudo env UV_INSTALL_DIR=/usr/local/bin sh
 sudo useradd --system --home /opt/crib-monitor --shell /usr/sbin/nologin cribmon
-sudo git clone <this repo> /opt/crib-monitor
+sudo git clone https://github.com/artcar12/crib-monitor.git /opt/crib-monitor
 sudo chown -R cribmon:cribmon /opt/crib-monitor
 cd /opt/crib-monitor
 sudo -u cribmon env UV_PYTHON_INSTALL_DIR=/opt/crib-monitor/.uv/python UV_CACHE_DIR=/opt/crib-monitor/.uv/cache uv sync --frozen --no-dev
