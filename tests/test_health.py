@@ -103,3 +103,11 @@ async def test_heartbeat_swallows_network_errors():
 
     hb = Heartbeat("https://hc-ping.com/abc", httpx.AsyncClient(transport=httpx.MockTransport(boom)))
     await hb.ping()
+
+
+async def test_heartbeat_swallows_non_http_errors():
+    def boom(request):
+        raise httpx.InvalidURL("bad url")
+
+    hb = Heartbeat("https://hc-ping.com/abc", httpx.AsyncClient(transport=httpx.MockTransport(boom)))
+    await hb.ping()

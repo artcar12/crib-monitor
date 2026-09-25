@@ -113,5 +113,5 @@ class Heartbeat:
         url = self._url if ok else self._url + "/fail"
         try:
             await self._client.get(url, timeout=10)
-        except httpx.HTTPError as exc:
+        except Exception as exc:  # never raise: a bad HEALTHCHECKS_URL must not crash the monitor
             log.warning("heartbeat ping failed: %s", exc)
