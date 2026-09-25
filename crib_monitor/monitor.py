@@ -256,26 +256,12 @@ class Monitor:
                 self._engine.reset()
         else:
             actions = self._engine.step(combined, now)
-        self._storage.save_check(now, jpeg, {
-            "motion": round(self._motion_peak, 4),
-            "results": [
-                {
-                    "model": r.model_name,
-                    "position": r.position.value if r.position else None,
-                    "latency_s": round(r.latency_s, 2),
-                    "error": r.error,
-                }
-                for r in results
-            ],
-            "combined": combined.value,
-            "paused": status.paused,
-            "state_before": before.value,
-            "state_after": self._engine.state.value,
-            "actions": [type(a).__name__ for a in actions],
-            "shadow_mode": self._cfg.alerts.shadow_mode,
-        })
+        # Update bookkeeping and dispatch any actions (alerts) before touching storage: a
+        # persistence failure below must never lose an already-decided alert, nor leave the
+        # same frame re-classified on every subsequent tick.
         self._last_check = now
         self._last_checked_seq = frame.seq
+        motion_peak = self._motion_peak
         self._motion_pending = False
         self._motion_peak = 0.0
         self._last_results = results
@@ -287,6 +273,27 @@ class Monitor:
             self._selftest_pending = False
             models = {r.model_name: r.position is not None for r in results}
             await self._send(self._alerter.monitoring_started(True, models, jpeg))
+        try:
+            self._storage.save_check(now, jpeg, {
+                "motion": round(motion_peak, 4),
+                "results": [
+                    {
+                        "model": r.model_name,
+                        "position": r.position.value if r.position else None,
+                        "latency_s": round(r.latency_s, 2),
+                        "error": r.error,
+                    }
+                    for r in results
+                ],
+                "combined": combined.value,
+                "paused": status.paused,
+                "state_before": before.value,
+                "state_after": self._engine.state.value,
+                "actions": [type(a).__name__ for a in actions],
+                "shadow_mode": self._cfg.alerts.shadow_mode,
+            })
+        except Exception as exc:
+            log.warning("could not save check: %s", type(exc).__name__)
 
     async def _act(self, action: object, jpeg: bytes, now: datetime) -> None:
         if isinstance(action, StomachAlert):

@@ -114,12 +114,28 @@ class FakeHeartbeat:
         self.pings.append(ok)
 
 
+class FailingStorage:
+    """A Storage stand-in whose save_check always raises, to test that a persistence
+    failure never swallows an already-decided alert."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def cleanup(self, now):
+        pass
+
+    def save_check(self, now, jpeg, record):
+        self.calls += 1
+        raise OSError("disk full")
+
+
 class Rig:
-    def __init__(self, config, tmp_path, local=(), cloud=(), local_default=B, cloud_default=B):
+    def __init__(self, config, tmp_path, local=(), cloud=(), local_default=B, cloud_default=B, storage=None):
         cfg = config.model_copy(update={
             "alerts": config.alerts.model_copy(update={"shadow_mode": False}),
             "storage": config.storage.model_copy(update={"data_dir": tmp_path}),
         })
+        self.cfg = cfg
         self.clock = Clock(TUE_1PM)
         self.capture = FakeCapture()
         self.local = FakeClassifier("local", local, local_default)
@@ -134,7 +150,7 @@ class Rig:
             alerter=self.alerter,
             health=Health(cfg.health, ["local", "cloud"], cfg.alerts.health_repeat_s),
             heartbeat=self.heartbeat,
-            storage=Storage(tmp_path, cfg.storage.retention_days, NY),
+            storage=storage if storage is not None else Storage(tmp_path, cfg.storage.retention_days, NY),
             now=self.clock,
         )
 
@@ -298,18 +314,35 @@ async def test_receipt_deadline_forces_new_alert_when_polling_keeps_failing(rig)
     await r.step(10)                      # confirmation: stomach -> alert, receipt scheduled
     assert r.alerter.calls.count("stomach") == 1
 
-    cfg = r.monitor._cfg
-    deadline_s = cfg.alerts.emergency_expire_s + 2 * cfg.alerts.receipt_poll_s
+    deadline_s = r.cfg.alerts.emergency_expire_s + 2 * r.cfg.alerts.receipt_poll_s
+    poll_s = r.cfg.alerts.receipt_poll_s
 
-    # Poll repeatedly (each poll raises NotifyError) but stay short of the deadline.
-    elapsed = 0
-    poll_s = cfg.alerts.receipt_poll_s
+    # Poll repeatedly (each poll raises NotifyError) but stay strictly short of the deadline.
+    elapsed = 0.0
     while elapsed + poll_s < deadline_s:
         await r.step(poll_s)
         elapsed += poll_s
     assert "receipt" in r.alerter.calls
-    assert r.alerter.calls.count("stomach") == 1
+    assert r.alerter.calls.count("stomach") == 1     # no second alert just before the deadline
 
-    # Cross the deadline: the engine should be forced to on_expired and re-alert.
-    await r.step(deadline_s)
+    # Cross the deadline by a few seconds only: on_expired should fire this tick, and the
+    # following forced check (still reading stomach) should send exactly one more alert.
+    await r.step(deadline_s - elapsed + 5)
     assert r.alerter.calls.count("stomach") == 2
+
+
+async def test_save_failure_does_not_lose_the_alert(rig):
+    # If persisting the check to disk fails (e.g. OSError, disk full), the decision already
+    # made (and any alert it produced) must not be lost, and bookkeeping for the checked frame
+    # must still update so the same frame isn't re-classified forever.
+    storage = FailingStorage()
+    r = rig(local=[S, S], storage=storage)
+    r.monitor.on()
+    await r.step()                        # self-test check: stomach -> confirming
+    await r.step(10)                      # confirmation: stomach -> alert
+    assert "stomach" in r.alerter.calls
+    assert storage.calls == 2             # save_check was attempted (and raised) both times
+
+    checks_before = r.checks
+    await r.monitor.tick()                # same frame seq, no new frame pushed
+    assert r.checks == checks_before      # must not re-run the models on the same frame
