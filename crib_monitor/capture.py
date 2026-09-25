@@ -18,6 +18,11 @@ log = logging.getLogger(__name__)
 _CREDENTIAL_RE = re.compile(r"(\w+://)[^/@\s]+@")
 
 
+def redact(text: str) -> str:
+    """Hide the user:password part of any URL (ffmpeg echoes the RTSP URL on errors)."""
+    return _CREDENTIAL_RE.sub(r"\1***@", text)
+
+
 @dataclass(frozen=True)
 class Frame:
     image: np.ndarray
@@ -155,7 +160,7 @@ class Capture:
         for raw_line in proc.stderr:
             line = raw_line.decode("utf-8", errors="replace").rstrip()
             if line:
-                log.warning("ffmpeg: %s", _CREDENTIAL_RE.sub(r"\1***@", line))
+                log.warning("ffmpeg: %s", redact(line))
 
     def _kill(self) -> None:
         proc = self._proc

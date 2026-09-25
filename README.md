@@ -42,7 +42,9 @@ sudo -u cribmon cp config.example.toml config.toml
 sudo -u cribmon install -m 600 /dev/null .env
 ```
 
-Put these in `.env` (no quotes; URL-encode any special characters in the camera password):
+Put these in `.env`. It is mode 600 and owned by `cribmon`, so edit it as that user
+(`sudo -u cribmon nano .env`, likewise for `config.toml`). No quotes; URL-encode any special characters in
+the camera password:
 
 ```
 TAPO_RTSP_URL=rtsp://USER:PASS@CAMERA_IP:554/stream1
@@ -53,12 +55,12 @@ CONTROL_TOKEN=<long random string, e.g. from: openssl rand -hex 16>
 OPENROUTER_API_KEY=...
 ```
 
-**Crib crop.** Grab a full frame and find the crib rectangle in pixel coordinates (any image viewer that
-shows cursor position works). Put it in `[camera.crop]`; all four values must be even.
+**Crib crop.** Save one full, uncropped frame (this reads `TAPO_RTSP_URL` from `.env` and classifies
+nothing), copy `full.jpg` to a machine with an image viewer that shows cursor position, and find the crib
+rectangle in pixel coordinates. Put it in `[camera.crop]`; all four values must be even.
 
 ```bash
-set -a; . ./.env; set +a
-ffmpeg -rtsp_transport tcp -i "$TAPO_RTSP_URL" -frames:v 1 full.jpg
+sudo -u cribmon .venv/bin/crib-monitor-probe --full --out full.jpg
 ```
 
 Set `[web] host` to the server's LAN address, then check everything end to end:
@@ -87,8 +89,11 @@ confirm Pushover gets through Do Not Disturb.
 
 ```bash
 uv run pytest                    # unit tests
-uv run pytest -m integration     # on the server, needs ffmpeg and mediamtx on PATH
+uv run pytest -m integration     # needs ffmpeg and mediamtx on PATH
 ```
+
+The service install uses `uv sync --no-dev`, so run the integration test from a dev checkout instead (for
+example a clone in your home directory on the server): `uv sync`, with ffmpeg and mediamtx installed.
 
 ## On-server verification checklist
 
@@ -102,7 +107,8 @@ and cannot be checked from a dev machine. Record the results in the PR or a note
 3. `crib-monitor-probe` gets a valid answer from the cloud model through OpenRouter (no
    `unavailable (… response_format …)` error). If the chosen model rejects `json_schema`, pick another model;
    parsing already tolerates plain JSON.
-4. `uv run pytest -m integration` passes on the server.
+4. `uv run pytest -m integration` passes on the server, run from a dev checkout (`uv sync`, with ffmpeg and
+   mediamtx installed), not from `/opt/crib-monitor`, which has no dev dependencies.
 5. Unplug the camera during a manual session: a "Monitor blind" alert arrives within about 2 minutes, and
    "Camera recovered" after plugging it back in.
 6. `sudo systemctl stop crib-monitor`: healthchecks.io alerts within about 3 minutes.
