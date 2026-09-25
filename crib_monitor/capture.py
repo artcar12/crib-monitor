@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -13,6 +14,8 @@ import numpy as np
 from .config import CribCrop
 
 log = logging.getLogger(__name__)
+
+_CREDENTIAL_RE = re.compile(r"(\w+://)[^/@\s]+@")
 
 
 @dataclass(frozen=True)
@@ -71,7 +74,10 @@ class Capture:
         self._kill()
         if self._thread is not None:
             self._thread.join(timeout=5)
-            self._thread = None
+            if self._thread.is_alive():
+                log.warning("capture supervisor thread did not exit within timeout")
+            else:
+                self._thread = None
 
     def latest(self) -> Frame | None:
         with self._lock:
@@ -93,7 +99,12 @@ class Capture:
 
     def _run_once(self) -> bool:
         try:
-            proc = subprocess.Popen(self._cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(
+                self._cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+            )
         except OSError as exc:
             log.error("cannot start capture command: %s", exc)
             return False
@@ -101,7 +112,11 @@ class Capture:
         got = threading.Event()
         last = [time.monotonic()]
         reader = threading.Thread(target=self._read, args=(proc, got, last), name="capture-reader", daemon=True)
+        stderr_reader = threading.Thread(
+            target=self._drain_stderr, args=(proc,), name="capture-stderr", daemon=True
+        )
         reader.start()
+        stderr_reader.start()
         try:
             while not self._stop.is_set() and proc.poll() is None:
                 limit = self._stall_s if got.is_set() else self._startup_s
@@ -112,6 +127,11 @@ class Capture:
         finally:
             self._kill()
             reader.join(timeout=2)
+            stderr_reader.join(timeout=2)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if proc.stderr is not None:
+                proc.stderr.close()
             self._proc = None
         return got.is_set()
 
@@ -127,6 +147,15 @@ class Capture:
                 self._latest = Frame(image=image, seq=self._seq)
             last[0] = time.monotonic()
             got.set()
+
+    def _drain_stderr(self, proc: subprocess.Popen[bytes]) -> None:
+        # ffmpeg logs the RTSP URL (which embeds the camera password) on failures such as a
+        # bad crop or a 401. Never forward it verbatim; redact credentials before logging.
+        assert proc.stderr is not None
+        for raw_line in proc.stderr:
+            line = raw_line.decode("utf-8", errors="replace").rstrip()
+            if line:
+                log.warning("ffmpeg: %s", _CREDENTIAL_RE.sub(r"\1***@", line))
 
     def _kill(self) -> None:
         proc = self._proc
