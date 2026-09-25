@@ -87,7 +87,10 @@ class Classifier:
             response = await asyncio.wait_for(self._completion(**self._request(jpeg)), timeout=self._cfg.timeout_s)
             position = parse_position(response.choices[0].message.content)
         except Exception as exc:  # any failure means "unavailable", never "back"
-            return ClassifyResult(self.name, None, time.monotonic() - start, f"{type(exc).__name__}: {exc}")
+            message = f"{type(exc).__name__}: {exc}"
+            if self._api_key:
+                message = message.replace(self._api_key, "***")
+            return ClassifyResult(self.name, None, time.monotonic() - start, message)
         return ClassifyResult(self.name, position, time.monotonic() - start)
 
     def _request(self, jpeg: bytes) -> dict[str, Any]:

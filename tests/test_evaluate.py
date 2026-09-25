@@ -25,6 +25,11 @@ def test_score_per_model_and_combined():
     assert combined.unavailable == 1
 
 
+def test_score_empty_still_has_combined():
+    stats = score([])
+    assert stats["combined"].tp == 0 and stats["combined"].fn == 0
+
+
 def test_report_mentions_every_model():
     report = format_report(score([item("stomach", S, B), item("back", B, B)]), checks_per_night=200)
     assert "local: stomach caught 1/1 (100%)" in report

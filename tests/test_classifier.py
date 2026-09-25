@@ -88,6 +88,14 @@ async def test_timeout_is_unavailable():
     assert result.position is None and "Timeout" in result.error
 
 
+async def test_exception_redacts_api_key():
+    fake = FakeCompletion(exc=RuntimeError("bad key sk-secret-123"))
+    result = await Classifier(CLOUD, "sk-secret-123", completion=fake).classify(b"x")
+    assert result.position is None
+    assert "sk-secret-123" not in result.error
+    assert "RuntimeError" in result.error
+
+
 async def test_classify_all_runs_concurrently():
     slow = [Classifier(m, None, completion=FakeCompletion('{"position": "back"}', delay=0.2)) for m in (LOCAL, CLOUD)]
     loop = asyncio.get_running_loop()

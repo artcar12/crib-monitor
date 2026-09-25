@@ -53,6 +53,7 @@ class Stats:
 
 def score(items: Iterable[tuple[str, list[ClassifyResult]]]) -> dict[str, Stats]:
     stats: dict[str, Stats] = {}
+    stats.setdefault("combined", Stats())
     for truth, results in items:
         is_stomach = truth == "stomach"
         for r in results:
