@@ -1,8 +1,14 @@
 import asyncio
 import contextlib
+import importlib.abc
+import importlib.util
+import os
+import sys
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from crib_monitor import main
@@ -133,3 +139,65 @@ async def test_amain_exits_nonzero_when_the_loop_dies(config, tmp_path, monkeypa
     monkeypatch.setattr(Monitor, "run_forever", boom)
     monkeypatch.setattr(main.uvicorn, "Server", FakeServer)
     assert await main.amain(cfg, load_secrets(ENV, cfg), ENV) == 1
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class FakeLitellmFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Serves a stand-in `litellm` and records the environment at the moment it is imported."""
+
+    def __init__(self):
+        self.cost_map_at_import = "not imported"
+
+    def find_spec(self, name, path, target=None):
+        return importlib.util.spec_from_loader(name, self) if name == "litellm" else None
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module):
+        self.cost_map_at_import = os.environ.get("LITELLM_LOCAL_MODEL_COST_MAP")
+        module.suppress_debug_info = False
+
+
+@pytest.fixture
+def run_main(tmp_path, monkeypatch):
+    finder = FakeLitellmFinder()
+    saved = sys.modules.pop("litellm", None)
+    monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
+    monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
+    for key, value in ENV.items():
+        monkeypatch.setenv(key, value)
+    seen = {}
+
+    def run(code):
+        async def fake_amain(cfg, secrets, env):
+            seen["suppress_debug_info"] = sys.modules["litellm"].suppress_debug_info
+            return code
+
+        monkeypatch.setattr(main, "amain", fake_amain)
+        main.run(["--config", str(ROOT / "config.example.toml"), "--env-file", str(tmp_path / "none")])
+        return finder, seen
+
+    yield run
+    sys.modules.pop("litellm", None)
+    if saved is not None:
+        sys.modules["litellm"] = saved
+
+
+def test_run_imports_litellm_at_startup_with_the_local_cost_map(run_main):
+    finder, seen = run_main(0)
+    assert finder.cost_map_at_import == "True"
+    assert seen["suppress_debug_info"] is True
+
+
+def test_run_exits_nonzero_when_amain_reports_a_dead_loop(run_main):
+    with pytest.raises(SystemExit) as exit_:
+        run_main(1)
+    assert exit_.value.code == 1
+
+
+def test_service_unit_uses_the_local_cost_map():
+    unit = (ROOT / "deploy" / "crib-monitor.service").read_text().splitlines()
+    assert "Environment=LITELLM_LOCAL_MODEL_COST_MAP=True" in unit

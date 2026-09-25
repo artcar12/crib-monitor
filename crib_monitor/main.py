@@ -117,6 +117,15 @@ async def amain(cfg: Config, secrets: Secrets, env: Mapping[str, str]) -> int:
     return exit_code
 
 
+def _import_litellm() -> None:
+    # Import at startup rather than on the first check: the import is slow and would block the
+    # event loop mid-session, and without this flag it fetches the model cost map over the network.
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    import litellm
+
+    litellm.suppress_debug_info = True
+
+
 def run(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="crib-monitor")
     parser.add_argument("--config", default="config.toml")
@@ -132,6 +141,7 @@ def run(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+    _import_litellm()
     code = asyncio.run(amain(cfg, secrets, os.environ))
     if code:
         raise SystemExit(code)

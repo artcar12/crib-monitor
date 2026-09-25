@@ -90,6 +90,16 @@ class ClassifierConfig(_Strict):
     max_side_px: int = 768
     models: list[ModelConfig] = Field(min_length=1)
 
+    @field_validator("models")
+    @classmethod
+    def _unique_names(cls, models: list[ModelConfig]) -> list[ModelConfig]:
+        # Health tracks each model by name, so two models with one name would share a streak.
+        names = [m.name for m in models]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError("duplicate model name(s): " + ", ".join(duplicates))
+        return models
+
 
 class AlertConfig(_Strict):
     shadow_mode: bool = True

@@ -8,6 +8,7 @@ User=cribmon
 Group=cribmon
 WorkingDirectory=/opt/crib-monitor
 EnvironmentFile=/opt/crib-monitor/.env
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
 ExecStart=/opt/crib-monitor/.venv/bin/crib-monitor --config /opt/crib-monitor/config.toml
 Restart=always
 RestartSec=5

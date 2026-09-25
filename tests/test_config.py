@@ -74,3 +74,9 @@ def test_cycle_days_not_multiple_of_7_rejected(tmp_path):
     path = write(tmp_path, EXAMPLE.replace("cycle_days = 14", "cycle_days = 10"))
     with pytest.raises(ConfigError, match="multiple of 7"):
         load_config(path)
+
+
+def test_duplicate_model_names_rejected(tmp_path):
+    path = write(tmp_path, EXAMPLE.replace('name = "cloud"', 'name = "local"'))
+    with pytest.raises(ConfigError, match="duplicate model name"):
+        load_config(path)
