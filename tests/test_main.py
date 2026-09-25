@@ -34,10 +34,10 @@ def test_build_wires_web_to_monitor(config, tmp_path):
     cfg = config.model_copy(update={"storage": config.storage.model_copy(update={"data_dir": tmp_path})})
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"status": 1})))
     monitor, app = build(cfg, load_secrets(ENV, cfg), ENV, client)
-    with TestClient(app) as web:
-        assert web.get("/").status_code == 403
-        assert "Off" in web.get("/?t=s3cret").text
-        web.post("/on?t=s3cret")
+    web = TestClient(app)  # no context manager: skip the lifespan so no real monitor loop (or ffmpeg) runs
+    assert web.get("/").status_code == 403
+    assert "Off" in web.get("/?t=s3cret").text
+    assert web.post("/on?t=s3cret", follow_redirects=False).status_code == 303
     assert (tmp_path / "state.json").exists()
 
 
@@ -166,7 +166,8 @@ def run_main(tmp_path, monkeypatch):
     finder = FakeLitellmFinder()
     saved = sys.modules.pop("litellm", None)
     monkeypatch.setattr(sys, "meta_path", [finder, *sys.meta_path])
-    monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP", raising=False)
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "")  # record it so the setdefault in run() is undone
+    monkeypatch.delenv("LITELLM_LOCAL_MODEL_COST_MAP")
     for key, value in ENV.items():
         monkeypatch.setenv(key, value)
     seen = {}
