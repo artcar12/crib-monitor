@@ -84,7 +84,7 @@ injected clock. All four are unit-tested against a fake clock.
 - Classify a frame when either:
   - the score exceeds `motion.threshold` (default 0.02) and at least `min_check_interval_s`
     (default 10) has passed since the last check, or
-  - `max_check_interval_s` (default 300) has passed since the last check.
+  - `max_check_interval_s` (default 90) has passed since the last check.
 - The decision engine can force faster checking (WATCH, CONFIRMING, PAUSED, NO_VIEW), which
   bypasses the motion requirement.
 - An IR day/night switch registers as motion and causes one check. This is harmless.
@@ -126,7 +126,7 @@ States: `MONITORING`, `WATCH`, `CONFIRMING`, `ALERTED`, `NO_VIEW`, plus `PAUSED`
 |---|---|---|
 | any watching state | `STOMACH` (first) | → `CONFIRMING`; force a new check ~10 s later |
 | `CONFIRMING` | `STOMACH` | Emergency alert with the frame attached → `ALERTED` |
-| `CONFIRMING` | `BACK` | Log false positive → `MONITORING` |
+| `CONFIRMING` | `BACK` | Log false positive → `WATCH` (keep checking every 30 s until 2 consecutive `BACK`) |
 | `CONFIRMING` | `SIDE` / `NO_VIEW` / `FAILED` | Check again in ~10 s. After 3 non-`BACK` confirmations without `STOMACH`, → `WATCH` |
 | `MONITORING` | `SIDE` | → `WATCH`: forced checks every 30 s |
 | `WATCH` | 2 consecutive `BACK` | → `MONITORING` |

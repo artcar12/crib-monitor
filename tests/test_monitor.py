@@ -252,7 +252,8 @@ async def test_max_interval_check_without_motion(rig):
     r = rig()
     r.monitor.on()
     await r.step()
-    for _ in range(299):
+    max_s = int(r.monitor._cfg.motion.max_check_interval_s)
+    for _ in range(max_s - 1):
         await r.step(1)
     assert r.checks == 1
     await r.step(1)
@@ -369,7 +370,7 @@ async def test_both_detectors_down_alerts_within_two_minutes_when_still(rig):
     await r.step()                            # self-test ok (back)
     r.local.default = r.cloud.default = None
     # The monitor only learns the models are down when it next checks (max interval, no motion).
-    assert await _run_until(r, lambda: r.checks == 2, 300) is not None
+    assert await _run_until(r, lambda: r.checks == 2, 95) is not None, "still baby went >90 s unchecked"
     took = await _run_until(r, lambda: "no_detectors" in _health_keys(r), 120)
     assert took is not None, "no 'no detectors' alert within 120 s of the first failed check"
 

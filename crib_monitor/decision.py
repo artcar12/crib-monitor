@@ -124,7 +124,7 @@ class Engine:
             self._suppress_until = None
             return [StomachAlert()]
         if result is Combined.BACK:
-            self._set(State.MONITORING)
+            self._set(State.WATCH)
             return [FalsePositive()]
         self._confirms += 1
         if self._confirms >= CONFIRM_ATTEMPTS:

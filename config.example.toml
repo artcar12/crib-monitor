@@ -24,7 +24,7 @@ h = 720
 threshold = 0.02                 # fraction of pixels that changed
 pixel_delta = 25                 # grey-level change that counts as "changed"
 min_check_interval_s = 10
-max_check_interval_s = 300
+max_check_interval_s = 90
 
 [classifier]
 max_side_px = 768

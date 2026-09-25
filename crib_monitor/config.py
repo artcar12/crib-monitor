@@ -74,7 +74,7 @@ class MotionConfig(_Strict):
     threshold: float = 0.02
     pixel_delta: int = 25
     min_check_interval_s: float = 10
-    max_check_interval_s: float = 300
+    max_check_interval_s: float = 90
 
 
 class ModelConfig(_Strict):

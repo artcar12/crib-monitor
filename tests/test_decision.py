@@ -30,7 +30,26 @@ def test_stomach_then_back_is_false_positive():
     e = Engine()
     actions, _ = feed(e, [ST, BK])
     assert names(actions) == ["FalsePositive"]
+    # Keep looking closely after a cancelled confirmation: a single misread BACK must not
+    # drop the next look to motion-or-max-interval.
+    assert e.state is State.WATCH
+    assert e.force_interval_s == 30
+
+
+def test_false_positive_relaxes_after_back_streak():
+    e = Engine()
+    feed(e, [ST, BK])
+    feed(e, [BK])
+    assert e.state is State.WATCH
+    feed(e, [BK])
     assert e.state is State.MONITORING
+
+
+def test_stomach_after_false_positive_confirms_again():
+    e = Engine()
+    actions, _ = feed(e, [ST, BK, ST, ST])
+    assert names(actions) == ["FalsePositive", "StomachAlert"]
+    assert e.state is State.ALERTED
 
 
 def test_unconfirmed_goes_to_watch():
