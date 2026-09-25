@@ -117,3 +117,33 @@ async def test_monitoring_started_marks():
     alerter = Alerter(pushover(rec), AlertConfig(shadow_mode=False))
     await alerter.monitoring_started(True, {"local": True, "cloud": False}, None)
     assert fields(rec.requests[0])["message"] == "Monitoring: camera ✓ local ✓ cloud ✗"
+
+
+async def test_receipt_http_error_does_not_leak_token():
+    rec = Recorder(httpx.Response(500))
+    with pytest.raises(NotifyError) as exc_info:
+        await pushover(rec).receipt("R1")
+    assert "tok" not in str(exc_info.value)
+    assert "tok" not in repr(exc_info.value)
+
+
+async def test_receipt_connect_error_does_not_leak_token():
+    rec = Recorder(httpx.ConnectError("boom"))
+    with pytest.raises(NotifyError) as exc_info:
+        await pushover(rec).receipt("R1")
+    assert "tok" not in str(exc_info.value)
+    assert "tok" not in repr(exc_info.value)
+
+
+async def test_send_gives_up_does_not_leak_credentials():
+    rec = Recorder(*[httpx.Response(503)] * 4)
+    with pytest.raises(NotifyError) as exc_info:
+        await pushover(rec).send("hello")
+    assert "tok" not in str(exc_info.value) and "usr" not in str(exc_info.value)
+    assert "tok" not in repr(exc_info.value) and "usr" not in repr(exc_info.value)
+
+
+async def test_send_retries_429():
+    rec = Recorder(httpx.Response(429), httpx.Response(200, json={"status": 1}))
+    await pushover(rec).send("hello")
+    assert len(rec.requests) == 2

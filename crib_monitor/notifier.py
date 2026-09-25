@@ -66,9 +66,10 @@ class Pushover:
             try:
                 response = await self._client.post(MESSAGES_URL, data=data, files=files, timeout=15)
             except httpx.HTTPError as exc:
-                last_error = repr(exc)
+                last_error = type(exc).__name__
+                log.warning("Pushover send attempt failed: %s", last_error)
                 continue
-            if 400 <= response.status_code < 500:
+            if 400 <= response.status_code < 500 and response.status_code != 429:
                 raise NotifyError(f"Pushover rejected message: {response.status_code} {response.text}")
             if response.status_code == 200:
                 try:
@@ -78,6 +79,7 @@ class Pushover:
                 if body.get("status") == 1:
                     return body.get("receipt")
             last_error = f"{response.status_code} {response.text}"
+            log.warning("Pushover send attempt failed: %s", last_error)
         raise NotifyError(f"Pushover send failed: {last_error}")
 
     async def receipt(self, receipt: str) -> ReceiptStatus:
@@ -85,16 +87,20 @@ class Pushover:
             response = await self._client.get(RECEIPT_URL.format(receipt=receipt), params={"token": self._token}, timeout=15)
             response.raise_for_status()
             body = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise NotifyError(f"receipt poll failed: HTTP {exc.response.status_code}") from exc
         except (httpx.HTTPError, ValueError) as exc:
-            raise NotifyError(f"receipt poll failed: {exc!r}") from exc
+            raise NotifyError(f"receipt poll failed: {type(exc).__name__}") from exc
         return ReceiptStatus(acknowledged=body.get("acknowledged") == 1, expired=body.get("expired") == 1)
 
     async def cancel(self, receipt: str) -> None:
         try:
             response = await self._client.post(CANCEL_URL.format(receipt=receipt), data={"token": self._token}, timeout=15)
             response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise NotifyError(f"receipt cancel failed: HTTP {exc.response.status_code}") from exc
         except httpx.HTTPError as exc:
-            raise NotifyError(f"receipt cancel failed: {exc!r}") from exc
+            raise NotifyError(f"receipt cancel failed: {type(exc).__name__}") from exc
 
 
 class Alerter:
