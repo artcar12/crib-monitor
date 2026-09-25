@@ -122,3 +122,109 @@ def test_force_intervals():
     e.reset()
     feed(e, [ST, ST])
     assert e.force_interval_s == 30
+
+
+def test_stomach_from_watch_confirms_then_alerts():
+    e = Engine()
+    feed(e, [SD])
+    assert e.state is State.WATCH
+    actions, _ = feed(e, [ST])
+    assert actions == []
+    assert e.state is State.CONFIRMING
+    actions, _ = feed(e, [ST])
+    assert names(actions) == ["StomachAlert"]
+    assert e.state is State.ALERTED
+
+
+def test_stomach_from_no_view_confirms_then_alerts():
+    e = Engine()
+    feed(e, [NV])
+    assert e.state is State.NO_VIEW
+    actions, _ = feed(e, [ST])
+    assert actions == []
+    assert e.state is State.CONFIRMING
+    actions, _ = feed(e, [ST])
+    assert names(actions) == ["StomachAlert"]
+    assert e.state is State.ALERTED
+
+
+def test_watch_then_no_view_enters_no_view():
+    e = Engine()
+    feed(e, [SD])
+    assert e.state is State.WATCH
+    feed(e, [NV])
+    assert e.state is State.NO_VIEW
+
+
+def test_confirming_boundary_alert_on_fourth_stomach():
+    e = Engine()
+    actions, _ = feed(e, [ST, SD, NV, ST])
+    assert names(actions) == ["StomachAlert"]
+    assert e.state is State.ALERTED
+
+
+def test_confirming_boundary_falls_to_watch_without_alert():
+    e = Engine()
+    actions, _ = feed(e, [ST, SD, NV, SD])
+    assert actions == []
+    assert e.state is State.WATCH
+
+
+def test_no_view_alerts_again_after_recovery():
+    e = Engine()
+    actions1, t = feed(e, [NV, NV, NV, NV], step_s=20)
+    assert names(actions1) == ["NoViewAlert"]
+    _, t = feed(e, [BK], start=t)
+    assert e.state is State.MONITORING
+    actions2, _ = feed(e, [NV, NV, NV, NV], start=t, step_s=20)
+    assert names(actions2) == ["NoViewAlert"]
+
+
+def test_alerted_non_consecutive_backs_no_back_on_back():
+    e = Engine()
+    _, t = feed(e, [ST, ST])
+    actions, _ = feed(e, [BK, ST, BK], start=t)
+    assert actions == []
+    assert e.state is State.ALERTED
+
+
+def test_no_third_alert_until_next_ack():
+    e = Engine(ack_suppress_s=180)
+    _, t = feed(e, [ST, ST])
+    e.on_ack(t)
+    actions, t = feed(e, [ST], start=t + timedelta(seconds=180))
+    assert names(actions) == ["StomachAlert"]
+    actions, _ = feed(e, [ST], start=t + timedelta(seconds=1000))
+    assert actions == []
+
+
+def test_watch_back_streak_with_failed_interleaved():
+    e = Engine()
+    feed(e, [SD])
+    assert e.state is State.WATCH
+    actions, _ = feed(e, [BK, FL, BK])
+    assert actions == []
+    assert e.state is State.MONITORING
+
+
+def test_no_view_streak_with_failed_interleaved_still_alerts():
+    e = Engine()
+    actions, _ = feed(e, [NV, FL, NV, FL, NV, FL, NV], step_s=20)
+    assert names(actions) == ["NoViewAlert"]
+
+
+def test_alerted_failed_interleaved_still_realerts():
+    e = Engine(ack_suppress_s=180)
+    _, t = feed(e, [ST, ST])
+    e.on_ack(t)
+    actions, _ = feed(e, [FL, ST], start=t + timedelta(seconds=180), step_s=10)
+    assert names(actions) == ["StomachAlert"]
+
+
+def test_repeated_ack_does_not_push_suppression_out():
+    e = Engine(ack_suppress_s=180)
+    _, t = feed(e, [ST, ST])
+    e.on_ack(t)
+    e.on_ack(t + timedelta(seconds=170))  # spurious repeat ack must be a no-op
+    actions, _ = feed(e, [ST], start=t + timedelta(seconds=180))
+    assert names(actions) == ["StomachAlert"]

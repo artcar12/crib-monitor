@@ -76,12 +76,12 @@ class Engine:
         return _FORCED.get(self.state)
 
     def on_ack(self, now: datetime) -> None:
-        if self.state is State.ALERTED:
+        if self.state is State.ALERTED and self._awaiting_ack:
             self._awaiting_ack = False
             self._suppress_until = now + self._ack_suppress
 
     def on_expired(self, now: datetime) -> None:
-        if self.state is State.ALERTED:
+        if self.state is State.ALERTED and self._awaiting_ack:
             self._awaiting_ack = False
             self._suppress_until = now
 
