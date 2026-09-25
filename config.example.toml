@@ -1,0 +1,68 @@
+# Copy to config.toml and edit. Secrets go in .env, not here.
+
+[schedule]
+cycle_anchor = "2026-09-25"      # a Friday that starts one of his weekends
+cycle_days = 14
+nights = ["fri", "sat", "sun"]   # nights within the first 7 days of the cycle that are armed
+window_start = "19:00"
+window_end = "07:00"             # next morning; windows may cross midnight
+extra_dates = []                 # extra nights to arm, "YYYY-MM-DD" (date the window starts)
+skip_dates = []                  # cycle nights to skip
+timezone = "America/New_York"
+
+[camera]
+stream_timeout_s = 5
+max_backoff_s = 15
+
+[camera.crop]                    # crib rectangle in stream1 pixels; all values must be even
+x = 0
+y = 0
+w = 1280
+h = 720
+
+[motion]
+threshold = 0.02                 # fraction of pixels that changed
+pixel_delta = 25                 # grey-level change that counts as "changed"
+min_check_interval_s = 10
+max_check_interval_s = 300
+
+[classifier]
+max_side_px = 768
+
+[[classifier.models]]
+name = "local"
+model = "openai/qwen3-vl:30b"                 # LiteLLM id; "openai/" = any OpenAI-compatible server
+api_base = "http://alien.lan:11434/v1"        # Ollama on the laptop
+timeout_s = 30
+
+[[classifier.models]]
+name = "cloud"
+model = "openrouter/anthropic/claude-haiku-4.5"
+api_key_env = "OPENROUTER_API_KEY"
+timeout_s = 20
+extra_body = { provider = { data_collection = "deny" } }
+
+[alerts]
+shadow_mode = true
+emergency_retry_s = 60
+emergency_expire_s = 1800
+receipt_poll_s = 15
+ack_suppress_s = 180
+health_repeat_s = 900
+
+[arming]
+manual_max_hours = 4
+pause_minutes = 45
+
+[storage]
+data_dir = "data"
+retention_days = 30
+
+[web]
+host = "192.168.1.50"            # the server's LAN address
+port = 8080
+
+[health]
+blind_after_s = 120
+model_down_after = 3
+heartbeat_interval_s = 60
