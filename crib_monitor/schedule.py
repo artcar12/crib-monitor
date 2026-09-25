@@ -39,6 +39,8 @@ class Schedule:
         return start, end
 
     def active_window(self, now: datetime) -> tuple[datetime, datetime] | None:
+        if now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
         today = now.astimezone(self._tz).date()
         for d in (today - timedelta(days=1), today):
             if self.is_armed_night(d):

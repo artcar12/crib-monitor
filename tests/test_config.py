@@ -68,3 +68,9 @@ def test_missing_secrets_are_all_listed(config):
         load_secrets(env, config)
     assert "PUSHOVER_USER" in str(err.value)
     assert "OPENROUTER_API_KEY" in str(err.value)
+
+
+def test_cycle_days_not_multiple_of_7_rejected(tmp_path):
+    path = write(tmp_path, EXAMPLE.replace("cycle_days = 14", "cycle_days = 10"))
+    with pytest.raises(ConfigError, match="multiple of 7"):
+        load_config(path)

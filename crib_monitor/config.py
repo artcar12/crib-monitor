@@ -33,6 +33,13 @@ class ScheduleConfig(_Strict):
     skip_dates: list[date] = []
     timezone: str
 
+    @field_validator("cycle_days")
+    @classmethod
+    def _multiple_of_7(cls, value: int) -> int:
+        if value % 7 != 0:
+            raise ValueError("cycle_days must be a multiple of 7")
+        return value
+
     @field_validator("timezone")
     @classmethod
     def _known_timezone(cls, value: str) -> str:

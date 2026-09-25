@@ -1,6 +1,8 @@
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from crib_monitor.config import ScheduleConfig
 from crib_monitor.schedule import Schedule
 
@@ -71,3 +73,10 @@ def test_same_day_window():
     s = make(window_start=time(13, 0), window_end=time(15, 0))
     assert s.active_window(at(2026, 9, 25, 14, 0)) is not None
     assert s.active_window(at(2026, 9, 25, 15, 0)) is None
+
+
+def test_naive_datetime_raises():
+    s = make()
+    naive_dt = datetime(2026, 9, 25, 19, 0)  # No tzinfo
+    with pytest.raises(ValueError, match="timezone-aware"):
+        s.active_window(naive_dt)
