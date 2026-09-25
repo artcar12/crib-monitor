@@ -151,8 +151,9 @@ Sources, in priority order:
    (default 4). At the cap, send a normal "nap monitoring ended" notice.
 3. **Schedule**: armed during configured windows.
 
-**Pause** applies on top of any armed session. It ends after 45 min, or once 2 consecutive checks
-see him in the crib (`BACK`/`SIDE`/`STOMACH`). While paused: no stomach or "can't see him" alerts, forced
+**Pause** applies on top of any armed session. It ends after 45 min, or once he has been out of view
+(`NO_VIEW`) and then 2 consecutive checks see him back in the crib (`BACK`/`SIDE`/`STOMACH`). Sightings
+before he has left the view don't count, so pressing Pause before picking him up doesn't end it early. While paused: no stomach or "can't see him" alerts, forced
 checks every 30 s, and health alerts stay active.
 
 ### Schedule config
@@ -199,7 +200,7 @@ attached.
 
 ## Storage
 
-- `data/frames/YYYY-MM-DD/HHMMSS.jpg`: every checked frame (the crop, as sent to the models).
+- `data/frames/YYYY-MM-DD/HHMMSS_mmm.jpg`: every checked frame (the crop, as sent to the models).
 - `data/log/YYYY-MM-DD.jsonl`: one record per check, with timestamp, motion score, each model's
   label and latency (or error), combined result, state before and after, and any action taken.
 - Frames and logs are deleted after `retention_days` (default 30). Labeled frames are copied into
