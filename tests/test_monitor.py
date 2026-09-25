@@ -1,0 +1,315 @@
+import asyncio
+import contextlib
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import numpy as np
+import pytest
+
+from crib_monitor.arming import Arming
+from crib_monitor.capture import Frame
+from crib_monitor.classifier import ClassifyResult
+from crib_monitor.health import Health
+from crib_monitor.labels import Position
+from crib_monitor.monitor import Monitor
+from crib_monitor.notifier import NotifyError, ReceiptStatus
+from crib_monitor.schedule import Schedule
+from crib_monitor.storage import Storage
+
+NY = ZoneInfo("America/New_York")
+TUE_1PM = datetime(2026, 9, 29, 13, 0, tzinfo=NY)   # outside the schedule
+B, S, NV = Position.BACK, Position.STOMACH, Position.NOT_VISIBLE
+
+
+def img(value=0):
+    return np.full((180, 320, 3), value, dtype=np.uint8)
+
+
+class Clock:
+    def __init__(self, start):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += timedelta(seconds=seconds)
+
+
+class FakeCapture:
+    def __init__(self):
+        self.started = self.stopped = 0
+        self.frame = None
+
+    def start(self):
+        self.started += 1
+
+    def stop(self):
+        self.stopped += 1
+
+    def latest(self):
+        return self.frame
+
+    def push(self, image=None):
+        seq = self.frame.seq + 1 if self.frame else 1
+        self.frame = Frame(image=img() if image is None else image, seq=seq)
+
+
+class FakeClassifier:
+    def __init__(self, name, script=(), default=B):
+        self.name, self.script, self.default, self.calls = name, list(script), default, 0
+
+    async def classify(self, jpeg):
+        self.calls += 1
+        position = self.script.pop(0) if self.script else self.default
+        return ClassifyResult(self.name, position, 0.1, None if position else "fake failure")
+
+
+class FakeAlerter:
+    def __init__(self):
+        self.calls, self.args, self.fail = [], {}, set()
+        self.receipt_status = ReceiptStatus(acknowledged=False, expired=False)
+
+    async def _call(self, name, *args, result=None):
+        self.calls.append(name)
+        self.args[name] = args
+        if name in self.fail:
+            raise NotifyError(name)
+        return result
+
+    async def stomach(self, image):
+        return await self._call("stomach", image, result="R1")
+
+    async def no_view(self, image):
+        return await self._call("no_view", image)
+
+    async def back_on_back(self):
+        return await self._call("back_on_back")
+
+    async def health(self, event):
+        return await self._call("health", event)
+
+    async def monitoring_started(self, camera_ok, models, image):
+        return await self._call("monitoring_started", camera_ok, models, image)
+
+    async def manual_ended(self):
+        return await self._call("manual_ended")
+
+    async def test(self):
+        return await self._call("test", result="T1")
+
+    async def receipt(self, receipt):
+        await self._call("receipt", receipt)
+        return self.receipt_status
+
+    async def cancel(self, receipt):
+        return await self._call("cancel", receipt)
+
+
+class FakeHeartbeat:
+    def __init__(self):
+        self.pings = []
+
+    async def ping(self, ok=True):
+        self.pings.append(ok)
+
+
+class Rig:
+    def __init__(self, config, tmp_path, local=(), cloud=(), local_default=B, cloud_default=B):
+        cfg = config.model_copy(update={
+            "alerts": config.alerts.model_copy(update={"shadow_mode": False}),
+            "storage": config.storage.model_copy(update={"data_dir": tmp_path}),
+        })
+        self.clock = Clock(TUE_1PM)
+        self.capture = FakeCapture()
+        self.local = FakeClassifier("local", local, local_default)
+        self.cloud = FakeClassifier("cloud", cloud, cloud_default)
+        self.alerter = FakeAlerter()
+        self.heartbeat = FakeHeartbeat()
+        self.monitor = Monitor(
+            cfg=cfg,
+            arming=Arming(Schedule(cfg.schedule), cfg.arming, tmp_path / "state.json"),
+            capture_factory=lambda: self.capture,
+            classifiers=[self.local, self.cloud],
+            alerter=self.alerter,
+            health=Health(cfg.health, ["local", "cloud"], cfg.alerts.health_repeat_s),
+            heartbeat=self.heartbeat,
+            storage=Storage(tmp_path, cfg.storage.retention_days, NY),
+            now=self.clock,
+        )
+
+    async def step(self, seconds=0, image=None):
+        self.clock.advance(seconds)
+        self.capture.push(image)
+        await self.monitor.tick()
+
+    @property
+    def checks(self):
+        return self.cloud.calls
+
+
+@pytest.fixture
+def rig(config, tmp_path):
+    return lambda **kw: Rig(config, tmp_path, **kw)
+
+
+async def test_disarmed_does_nothing(rig):
+    r = rig()
+    await r.monitor.tick()
+    assert r.capture.started == 0 and r.checks == 0
+    assert r.heartbeat.pings == [True]
+
+
+async def test_arming_runs_selftest(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    assert r.capture.started == 1 and r.checks == 1
+    camera_ok, models, image = r.alerter.args["monitoring_started"]
+    assert camera_ok is True and models == {"local": True, "cloud": True} and image[:2] == b"\xff\xd8"
+
+
+async def test_no_frame_selftest_reports_camera_down(rig):
+    r = rig()
+    r.monitor.on()
+    await r.monitor.tick()
+    r.clock.advance(30)
+    await r.monitor.tick()
+    camera_ok, models, _ = r.alerter.args["monitoring_started"]
+    assert camera_ok is False and models == {"local": None, "cloud": None}
+
+
+async def test_stomach_confirmed_alerts_polls_and_clears(rig):
+    r = rig(local=[S, S])
+    r.monitor.on()
+    await r.step()                        # self-test check: stomach -> confirming
+    await r.step(10)                      # confirmation: stomach -> alert
+    assert r.alerter.calls.count("stomach") == 1
+    assert r.monitor.snapshot().state == "alerted"
+    r.alerter.receipt_status = ReceiptStatus(acknowledged=True, expired=False)
+    await r.step(15)                      # receipt poll
+    assert "receipt" in r.alerter.calls
+    await r.step(15)                      # back (1)
+    await r.step(30)                      # back (2) -> back on back
+    assert "back_on_back" in r.alerter.calls
+    assert r.monitor.snapshot().state == "monitoring"
+
+
+async def test_one_model_down_still_alerts(rig):
+    r = rig(cloud=[S, S], local_default=None)
+    r.monitor.on()
+    await r.step()
+    await r.step(10)
+    assert r.alerter.calls.count("stomach") == 1
+
+
+async def test_paused_suppresses_and_resumes_after_return(rig):
+    script = [B, S, NV, B, B]
+    r = rig(local=script, cloud=script)
+    r.monitor.on()
+    await r.step()                        # self-test: back
+    assert r.monitor.pause()
+    await r.step(30)                      # stomach while paused: no alert
+    await r.step(30)                      # not visible (picked up)
+    await r.step(30)                      # back
+    assert r.monitor.snapshot().status.paused
+    await r.step(30)                      # back again -> pause ends
+    await r.step(1)
+    assert "stomach" not in r.alerter.calls
+    assert not r.monitor.snapshot().status.paused
+
+
+async def test_motion_gating(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    for _ in range(20):
+        await r.step(1)
+    assert r.checks == 1
+    await r.step(1, image=img(200))
+    assert r.checks == 2
+
+
+async def test_max_interval_check_without_motion(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    for _ in range(299):
+        await r.step(1)
+    assert r.checks == 1
+    await r.step(1)
+    assert r.checks == 2
+
+
+async def test_manual_cap_stops_capture_and_notifies(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    r.clock.advance(4 * 3600)
+    await r.monitor.tick()
+    assert r.capture.stopped == 1
+    assert "manual_ended" in r.alerter.calls
+
+
+async def test_notification_failure_fails_heartbeat(rig):
+    r = rig(local=[S, S])
+    r.alerter.fail = {"stomach"}
+    r.monitor.on()
+    await r.step()
+    await r.step(10)
+    assert False in r.heartbeat.pings
+
+
+async def test_tick_exception_fails_heartbeat(rig):
+    r = rig()
+
+    class Broken(FakeCapture):
+        def latest(self):
+            raise RuntimeError("bug")
+
+    r.capture = Broken()
+    r.monitor.on()
+    task = asyncio.create_task(r.monitor.run_forever(interval_s=0.01))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    assert r.heartbeat.pings and r.heartbeat.pings[0] is False
+    assert True not in r.heartbeat.pings
+
+
+async def test_logs_every_check(rig, tmp_path):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    logs = list((tmp_path / "log").glob("*.jsonl"))
+    text = logs[0].read_text()
+    assert len(logs) == 1 and '"combined": "back"' in text and '"motion":' in text
+
+
+async def test_receipt_deadline_forces_new_alert_when_polling_keeps_failing(rig):
+    # alerter.receipt() always raises NotifyError; the models keep reporting stomach.
+    # Before the receipt deadline, only one stomach alert should have gone out. Once the
+    # deadline passes, on_expired must fire so a still-stomach baby gets a second alert.
+    r = rig(local_default=S, cloud_default=S)
+    r.alerter.fail = {"receipt"}
+    r.monitor.on()
+    await r.step()                        # self-test check: stomach -> confirming
+    await r.step(10)                      # confirmation: stomach -> alert, receipt scheduled
+    assert r.alerter.calls.count("stomach") == 1
+
+    cfg = r.monitor._cfg
+    deadline_s = cfg.alerts.emergency_expire_s + 2 * cfg.alerts.receipt_poll_s
+
+    # Poll repeatedly (each poll raises NotifyError) but stay short of the deadline.
+    elapsed = 0
+    poll_s = cfg.alerts.receipt_poll_s
+    while elapsed + poll_s < deadline_s:
+        await r.step(poll_s)
+        elapsed += poll_s
+    assert "receipt" in r.alerter.calls
+    assert r.alerter.calls.count("stomach") == 1
+
+    # Cross the deadline: the engine should be forced to on_expired and re-alert.
+    await r.step(deadline_s)
+    assert r.alerter.calls.count("stomach") == 2
