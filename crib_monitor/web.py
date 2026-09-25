@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import html
 import secrets
+from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -91,8 +93,13 @@ def _label_page(remaining: list[str], q: str) -> str:
     return _html("Label frames", body + f'<p><a href="/{q}">Back to status</a></p>')
 
 
-def create_app(controller: Any, storage: Storage, token: str, tz: ZoneInfo) -> FastAPI:
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+
+
+def create_app(
+    controller: Any, storage: Storage, token: str, tz: ZoneInfo, lifespan: Lifespan | None = None
+) -> FastAPI:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     q = f"?t={quote(token)}"
 
     def auth(t: str = Query("")) -> None:

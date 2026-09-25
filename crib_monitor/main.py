@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -26,12 +27,50 @@ from .monitor import Monitor
 from .notifier import Alerter, Pushover
 from .schedule import Schedule
 from .storage import Storage
-from .web import create_app
+from .web import Lifespan, create_app
 
 log = logging.getLogger("crib_monitor")
 
 
-def build(cfg: Config, secrets: Secrets, env: Mapping[str, str], client: httpx.AsyncClient) -> tuple[Monitor, FastAPI]:
+def loop_done(task: asyncio.Task[None], on_exit: Callable[[], None]) -> None:
+    """Done-callback for the monitor loop task: anything but cancellation is fatal."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    # Type name only: an exception message could carry a URL or token.
+    log.critical("monitor loop stopped (%s); exiting", type(exc).__name__ if exc else "returned")
+    on_exit()
+
+
+def monitor_lifespan(monitor: Monitor, on_exit: Callable[[], None]) -> Lifespan:
+    """Run the monitor loop for as long as the web server runs.
+
+    uvicorn runs lifespan shutdown on SIGTERM before re-raising the signal, so this is where
+    the capture process gets stopped. shutdown() never cancels an open emergency receipt.
+    """
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        task = asyncio.create_task(monitor.run_forever(), name="monitor-loop")
+        task.add_done_callback(lambda t: loop_done(t, on_exit))
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):  # a crash was already logged
+                await task
+            monitor.shutdown()
+
+    return lifespan
+
+
+def build(
+    cfg: Config,
+    secrets: Secrets,
+    env: Mapping[str, str],
+    client: httpx.AsyncClient,
+    on_loop_exit: Callable[[], None] = lambda: None,
+) -> tuple[Monitor, FastAPI]:
     tz = ZoneInfo(cfg.schedule.timezone)
     storage = Storage(cfg.storage.data_dir, cfg.storage.retention_days, tz)
     arming = Arming(Schedule(cfg.schedule), cfg.arming, Path(cfg.storage.data_dir) / "state.json")
@@ -54,21 +93,28 @@ def build(cfg: Config, secrets: Secrets, env: Mapping[str, str], client: httpx.A
         storage=storage,
         now=lambda: datetime.now(UTC),
     )
-    return monitor, create_app(monitor, storage, secrets.control_token, tz)
+    app = create_app(monitor, storage, secrets.control_token, tz, lifespan=monitor_lifespan(monitor, on_loop_exit))
+    return monitor, app
 
 
-async def amain(cfg: Config, secrets: Secrets, env: Mapping[str, str]) -> None:
+async def amain(cfg: Config, secrets: Secrets, env: Mapping[str, str]) -> int:
+    """Serve until stopped. Returns 1 if the monitor loop died, so systemd restarts us."""
+    exit_code = 0
+    server: uvicorn.Server | None = None
+
+    def loop_died() -> None:
+        nonlocal exit_code
+        exit_code = 1
+        if server is not None:
+            server.should_exit = True
+
     async with httpx.AsyncClient() as client:
-        monitor, app = build(cfg, secrets, env, client)
+        _, app = build(cfg, secrets, env, client, on_loop_exit=loop_died)
         server = uvicorn.Server(
             uvicorn.Config(app, host=cfg.web.host, port=cfg.web.port, access_log=False, log_level="info")
         )
-        loop_task = asyncio.create_task(monitor.run_forever())
-        try:
-            await server.serve()
-        finally:
-            loop_task.cancel()
-            monitor.shutdown()
+        await server.serve()
+    return exit_code
 
 
 def run(argv: list[str] | None = None) -> None:
@@ -86,4 +132,6 @@ def run(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    asyncio.run(amain(cfg, secrets, os.environ))
+    code = asyncio.run(amain(cfg, secrets, os.environ))
+    if code:
+        raise SystemExit(code)
