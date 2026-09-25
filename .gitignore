@@ -4,3 +4,6 @@ __pycache__/
 .venv/
 config.toml
 .superpowers/
+.uv/
+probe.jpg
+full.jpg

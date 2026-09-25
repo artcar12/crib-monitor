@@ -1,0 +1,16 @@
+[Unit]
+Description=Crib roll-over monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cribmon
+Group=cribmon
+WorkingDirectory=/opt/crib-monitor
+EnvironmentFile=/opt/crib-monitor/.env
+ExecStart=/opt/crib-monitor/.venv/bin/crib-monitor --config /opt/crib-monitor/config.toml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
