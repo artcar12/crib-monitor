@@ -31,6 +31,9 @@ packages = ["crib_monitor"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = ["integration: needs ffmpeg and mediamtx on PATH"]
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [dependency-groups]
 dev = [
