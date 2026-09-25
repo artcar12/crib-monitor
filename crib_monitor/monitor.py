@@ -13,7 +13,7 @@ from .arming import Arming, ArmingStatus
 from .capture import Frame
 from .classifier import ClassifyResult, classify_all
 from .config import Config
-from .decision import BackOnBack, Engine, FalsePositive, NoViewAlert, StomachAlert
+from .decision import WATCH_INTERVAL_S, BackOnBack, Engine, FalsePositive, NoViewAlert, StomachAlert
 from .health import Health
 from .imaging import encode_jpeg, resize_max_side
 from .labels import Combined, combine
@@ -89,6 +89,7 @@ class Monitor:
         self._receipt: str | None = None
         self._next_receipt_poll: datetime | None = None
         self._receipt_deadline: datetime | None = None
+        self._off_requested = False
         self._notify_failing = False
         self._last_heartbeat: datetime | None = None
         self._last_fail_ping: datetime | None = None
@@ -104,6 +105,7 @@ class Monitor:
 
     def off(self) -> None:
         self._arming.turn_off(self._now())
+        self._off_requested = True
 
     def pause(self) -> bool:
         return self._arming.pause(self._now())
@@ -167,14 +169,18 @@ class Monitor:
             self._last_heartbeat is None
             or (now - self._last_heartbeat).total_seconds() >= self._cfg.health.heartbeat_interval_s
         ):
-            await self._heartbeat.ping(ok=not self._notify_failing)
+            await self._heartbeat.ping(ok=True)
             self._last_heartbeat = now
+            # Any failed send since the last green ping was already reported with /fail; a new
+            # failure from here on reports again, but one failure must not pin the check down.
+            self._notify_failing = False
 
     # --- internals ---------------------------------------------------------
 
     async def _handle_transitions(self, status: ArmingStatus, now: datetime) -> None:
         prev = self._status
         was_armed = prev is not None and prev.armed
+        user_off, self._off_requested = self._off_requested, False
         if status.armed and not was_armed:
             log.info("armed (%s)", status.source)
             self._capture = self._capture_factory()
@@ -193,7 +199,12 @@ class Monitor:
         elif was_armed and not status.armed:
             log.info("disarmed")
             self.shutdown()
-            await self._cancel_receipt()
+            if user_off:
+                await self._cancel_receipt()      # someone pressed Off, so someone is there
+            else:
+                # Schedule window or manual cap ended on its own: nobody has seen the emergency,
+                # so leave it ringing until it is acknowledged or expires.
+                self._forget_receipt()
             self._frame = None
             assert prev is not None
             if prev.source == "manual" and prev.manual_until is not None and now >= prev.manual_until:
@@ -202,7 +213,9 @@ class Monitor:
             if status.paused and not prev.paused:
                 await self._cancel_receipt()
             if prev.paused and not status.paused:
+                # Pause timed out or Resume was pressed: start over and check right away.
                 self._engine.reset()
+                self._last_check = None
 
     async def _tick_armed(self, status: ArmingStatus, now: datetime) -> None:
         frame = self._capture.latest() if self._capture else None
@@ -235,6 +248,11 @@ class Monitor:
             return True
         since = (now - self._last_check).total_seconds()
         forced = PAUSED_INTERVAL_S if status.paused else self._engine.force_interval_s
+        if any(r.position is None for r in self._last_results):
+            # A model failed last check (both failed = FAILED, which moves no state): keep
+            # checking at the WATCH cadence so "no detectors" / "one detector" alerts arrive
+            # within minutes instead of waiting for motion or max_check_interval_s.
+            forced = WATCH_INTERVAL_S if forced is None else min(forced, WATCH_INTERVAL_S)
         if forced is not None and since >= forced:
             return True
         if since >= self._cfg.motion.max_check_interval_s:
@@ -247,13 +265,18 @@ class Monitor:
         jpeg = encode_jpeg(resize_max_side(frame.image, self._cfg.classifier.max_side_px))
         results = await classify_all(self._classifiers, jpeg)
         combined = combine(r.position for r in results)
-        for event in self._health.results(results, now):
-            await self._send(self._alerter.health(event))
+        health_events = self._health.results(results, now)
         before = self._engine.state
         actions = []
         if status.paused:
             if self._arming.observe(combined, now):
+                # He is back in view and the pause just ended on this reading: start over and
+                # feed it to the engine, so a stomach sighting goes straight to CONFIRMING.
                 self._engine.reset()
+                actions = self._engine.step(combined, now)
+                # Record the unpause now so the next tick doesn't treat it as a fresh one
+                # and reset the engine again.
+                self._status = self._arming.status(now)
         else:
             actions = self._engine.step(combined, now)
         # Update bookkeeping and dispatch any actions (alerts) before touching storage: a
@@ -269,6 +292,9 @@ class Monitor:
         self._last_jpeg = jpeg
         for action in actions:
             await self._act(action, jpeg, now)
+        # After the engine's actions: an emergency must never wait behind a health message.
+        for event in health_events:
+            await self._send(self._alerter.health(event))
         if self._selftest_pending:
             self._selftest_pending = False
             models = {r.model_name: r.position is not None for r in results}
@@ -344,11 +370,16 @@ class Monitor:
             self._receipt_deadline = None
             self._engine.on_expired(now)
 
+    def _forget_receipt(self) -> None:
+        self._receipt = None
+        self._next_receipt_poll = None
+        self._receipt_deadline = None
+
     async def _cancel_receipt(self) -> None:
         if self._receipt is None:
             return
-        receipt, self._receipt = self._receipt, None
-        self._receipt_deadline = None
+        receipt = self._receipt
+        self._forget_receipt()
         try:
             await self._alerter.cancel(receipt)
         except NotifyError as exc:
@@ -357,11 +388,17 @@ class Monitor:
     async def _send(self, coro: Awaitable[T]) -> T | None:
         try:
             result = await coro
-        except NotifyError as exc:
-            log.error("notification failed: %s", exc)
+        except Exception as exc:
+            # Any exception is a failed send, so the caller's retry path (e.g. re-alerting a
+            # stomach) still runs. NotifyError messages are already scrubbed; anything else
+            # could carry a token, so log only its type.
+            detail = str(exc) if isinstance(exc, NotifyError) else type(exc).__name__
+            log.error("notification failed: %s", detail)
             if not self._notify_failing:
                 self._notify_failing = True
                 await self._heartbeat.ping(ok=False)
+                # Hold the next green ping for a full interval so /fail is not undone at once.
+                self._last_heartbeat = self._now()
             return None
         self._notify_failing = False
         return result

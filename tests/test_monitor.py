@@ -68,6 +68,7 @@ class FakeClassifier:
 class FakeAlerter:
     def __init__(self):
         self.calls, self.args, self.fail = [], {}, set()
+        self.health_events = []
         self.receipt_status = ReceiptStatus(acknowledged=False, expired=False)
 
     async def _call(self, name, *args, result=None):
@@ -87,6 +88,7 @@ class FakeAlerter:
         return await self._call("back_on_back")
 
     async def health(self, event):
+        self.health_events.append(event)
         return await self._call("health", event)
 
     async def monitoring_started(self, camera_ok, models, image):
@@ -346,3 +348,176 @@ async def test_save_failure_does_not_lose_the_alert(rig):
     checks_before = r.checks
     await r.monitor.tick()                # same frame seq, no new frame pushed
     assert r.checks == checks_before      # must not re-run the models on the same frame
+
+
+async def _run_until(r, predicate, limit_s):
+    """Step one second at a time with still frames; return seconds taken, or None."""
+    for t in range(1, limit_s + 1):
+        await r.step(1)
+        if predicate():
+            return t
+    return None
+
+
+def _health_keys(r):
+    return [c.key for c in r.alerter.health_events]
+
+
+async def test_both_detectors_down_alerts_within_two_minutes_when_still(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()                            # self-test ok (back)
+    r.local.default = r.cloud.default = None
+    # The monitor only learns the models are down when it next checks (max interval, no motion).
+    assert await _run_until(r, lambda: r.checks == 2, 300) is not None
+    took = await _run_until(r, lambda: "no_detectors" in _health_keys(r), 120)
+    assert took is not None, "no 'no detectors' alert within 120 s of the first failed check"
+
+
+async def test_both_detectors_down_from_arming_alerts_within_two_minutes(rig):
+    r = rig(local_default=None, cloud_default=None)
+    r.monitor.on()
+    await r.step()
+    assert await _run_until(r, lambda: "no_detectors" in _health_keys(r), 120) is not None
+
+
+async def test_pause_ended_by_stomach_sighting_keeps_that_reading(rig):
+    r = rig(local=[B, NV, S, S], cloud=[B, NV, S, S], local_default=S, cloud_default=S)
+    r.monitor.on()
+    await r.step()                            # self-test: back
+    assert r.monitor.pause()
+    await r.step(30)                          # not visible: he has left the view
+    await r.step(30)                          # stomach sighting 1
+    await r.step(30)                          # stomach sighting 2 -> pause ends
+    assert r.monitor.snapshot().state == "confirming"
+    assert not r.monitor.snapshot().status.paused
+    assert await _run_until(r, lambda: "stomach" in r.alerter.calls, 60) is not None
+
+
+async def test_pause_timeout_checks_on_the_next_tick(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    assert r.monitor.pause()
+    pause_s = r.cfg.arming.pause_minutes * 60
+    elapsed = 0
+    while elapsed + 30 < pause_s:
+        await r.step(30)
+        elapsed += 30
+    n = r.checks
+    await r.step(pause_s - elapsed + 1)       # pause times out on this tick
+    assert not r.monitor.snapshot().status.paused
+    assert r.checks == n + 1
+
+
+async def test_resume_checks_on_the_next_tick(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    assert r.monitor.pause()
+    await r.step(30)
+    n = r.checks
+    r.monitor.resume()
+    await r.step(1)
+    assert r.checks == n + 1
+
+
+async def test_schedule_end_leaves_unacked_emergency_running(rig):
+    r = rig(local=[S, S])
+    r.clock.now = datetime(2026, 9, 26, 6, 58, tzinfo=NY)    # Friday night's window ends at 07:00
+    await r.step()                            # armed by the schedule; self-test: stomach -> confirming
+    await r.step(10)                          # confirmed -> emergency alert
+    assert r.alerter.calls.count("stomach") == 1
+    await r.step(15)                          # receipt polled: not acknowledged
+    r.clock.now = datetime(2026, 9, 26, 7, 0, 1, tzinfo=NY)
+    await r.monitor.tick()                    # window over: disarmed automatically
+    assert not r.monitor.snapshot().status.armed
+    assert "cancel" not in r.alerter.calls
+    r.clock.advance(60)
+    await r.monitor.tick()
+    assert "cancel" not in r.alerter.calls
+
+
+async def test_manual_cap_leaves_unacked_emergency_running(rig):
+    r = rig(local_default=S, cloud_default=S)
+    r.monitor.on()
+    await r.step()
+    await r.step(10)
+    assert r.alerter.calls.count("stomach") == 1
+    r.clock.now = r.monitor.snapshot().status.manual_until
+    await r.monitor.tick()                    # 4 h cap: disarmed automatically
+    assert "manual_ended" in r.alerter.calls
+    assert "cancel" not in r.alerter.calls
+
+
+async def test_manual_off_cancels_unacked_emergency(rig):
+    r = rig(local=[S, S])
+    r.monitor.on()
+    await r.step()
+    await r.step(10)
+    assert r.alerter.calls.count("stomach") == 1
+    r.monitor.off()
+    await r.step(1)
+    assert r.alerter.args["cancel"] == ("R1",)
+
+
+async def test_failed_send_fails_one_heartbeat_then_goes_green(rig):
+    r = rig()
+    r.monitor.on()
+    await r.step()
+    r.alerter.fail.add("manual_ended")
+    r.clock.advance(4 * 3600)
+    await r.monitor.tick()                    # manual cap: the "nap monitoring ended" send fails
+    assert r.heartbeat.pings[-1] is False
+    r.clock.advance(61)
+    await r.monitor.tick()
+    assert r.heartbeat.pings[-1] is True      # the failure was reported; don't latch /fail
+    for _ in range(3):
+        r.clock.advance(61)
+        await r.monitor.tick()
+    assert r.heartbeat.pings[-3:] == [True] * 3
+
+
+async def test_each_failure_episode_fails_the_heartbeat_again(rig):
+    r = rig(local_default=S, cloud_default=S)
+    r.alerter.fail.add("stomach")
+    r.monitor.on()
+    await r.step()
+    await r.step(10)                          # first emergency send fails
+    assert r.heartbeat.pings[-1] is False
+    await r.step(61)
+    assert r.heartbeat.pings[-1] is True
+    n = r.alerter.calls.count("stomach")
+    assert await _run_until(r, lambda: r.alerter.calls.count("stomach") > n, 300) is not None
+    assert r.heartbeat.pings[-1] is False     # the re-alert failed too: /fail again
+
+
+async def test_unexpected_send_error_is_a_failed_send_and_re_alerts(rig, caplog):
+    r = rig(local_default=S, cloud_default=S)
+    sent = []
+
+    async def stomach(image):
+        sent.append(image)
+        if len(sent) == 1:
+            raise RuntimeError("client closed, token=hunter2")
+        return "R2"
+
+    r.alerter.stomach = stomach
+    r.monitor.on()
+    await r.step()
+    await r.step(10)                          # first emergency send raises a non-NotifyError
+    assert len(sent) == 1
+    assert r.heartbeat.pings[-1] is False
+    assert await _run_until(r, lambda: len(sent) == 2, 300) is not None
+    assert "RuntimeError" in caplog.text
+    assert "hunter2" not in caplog.text
+
+
+async def test_emergency_is_sent_before_health_messages_from_the_same_check(rig):
+    r = rig(local_default=None, cloud=[B, S, S])
+    r.monitor.on()
+    await r.step()                            # back; local failure 1
+    await r.step(30)                          # stomach -> confirming; local failure 2
+    await r.step(10)                          # confirmed; local failure 3 -> "one detector"
+    assert "stomach" in r.alerter.calls and "health" in r.alerter.calls
+    assert r.alerter.calls.index("stomach") < r.alerter.calls.index("health")
