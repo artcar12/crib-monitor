@@ -1,7 +1,7 @@
 # Crib Monitor — Design
 
 Date: 2026-09-24
-Status: Draft, awaiting review
+Status: Approved
 
 ## Purpose
 
@@ -166,7 +166,7 @@ window_start = "19:00"
 window_end = "07:00"             # next morning; windows may cross midnight
 extra_dates = []                 # nights to arm outside the cycle, "YYYY-MM-DD"
 skip_dates = []                  # cycle nights to skip
-timezone = "America/Chicago"
+timezone = "America/New_York"
 ```
 
 A night's date is the date the window *starts*. Times are wall-clock in `timezone`, so DST
